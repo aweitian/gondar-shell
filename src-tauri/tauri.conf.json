@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.tauri.app/config/2.0.0",
+  "productName": "tauri-app",
+  "version": "0.0.0",
+  "identifier": "com.tauri.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Tauri App",
+        "width": 800,
+        "height": 600
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "icon": ["icons/icon.ico"]
+  }
+}
