@@ -75,6 +75,7 @@ const statusText = ref('已断开')
 const terminalRef = ref(null)
 let terminal = null
 let fitAddon = null
+let readLoop = null
 
 const loadConnections = async () => {
   try {
@@ -147,46 +148,34 @@ const handleTerminalInput = async (data) => {
     return
   }
 
-  if (data === '\r') {
-    terminal.write('\r\n')
-    const command = currentCommand.trim()
-    if (command) {
-      terminal.write(`$ ${command}\r\n`)
-      terminal.write('执行中...\r\n')
-      currentCommand = ''
-      
-      try {
-        console.log('执行命令:', command)
-        const result = await invoke('execute_command', {
-          ip: selectedConnection.value.ip,
-          port: selectedConnection.value.port,
-          username: selectedConnection.value.username,
-          password: selectedConnection.value.pass,
-          command: command
-        })
-        console.log('命令结果:', result)
-        terminal.write(result)
-      } catch (error) {
-        console.error('命令执行错误:', error)
-        terminal.write(`错误: ${error}\r\n`)
-      }
-      
-      terminal.write('\r\n$ ')
-    } else {
-      terminal.write('$ ')
-    }
-  } else if (data === '\x7f') {
-    if (currentCommand.length > 0) {
-      currentCommand = currentCommand.slice(0, -1)
-      terminal.write('\b \b')
-    }
-  } else {
-    currentCommand += data
-    terminal.write(data)
+  try {
+    await invoke('async_write_to_pty', { data: data })
+  } catch (error) {
+    terminal.write(`写入错误: ${error}\r\n`)
   }
 }
 
-let currentCommand = ''
+const startReadLoop = () => {
+  readLoop = setInterval(async () => {
+    if (connectionStatus.value !== 'connected') return
+    
+    try {
+      const result = await invoke('async_read_from_pty')
+      if (result) {
+        terminal.write(result)
+      }
+    } catch (error) {
+      console.error('读取终端输出失败:', error)
+    }
+  }, 50)
+}
+
+const stopReadLoop = () => {
+  if (readLoop) {
+    clearInterval(readLoop)
+    readLoop = null
+  }
+}
 
 const connect = async () => {
   if (!selectedConnection.value) return
@@ -195,7 +184,6 @@ const connect = async () => {
   statusText.value = '连接中...'
   
   initTerminal()
-  terminal.write('连接中...\r\n')
 
   try {
     const result = await invoke('connect_ssh', {
@@ -208,7 +196,10 @@ const connect = async () => {
     connectionStatus.value = 'connected'
     statusText.value = '已连接'
     terminal.write(`${result}\r\n`)
-    terminal.write('$ ')
+    
+    setTimeout(() => {
+      startReadLoop()
+    }, 500)
   } catch (error) {
     connectionStatus.value = 'disconnected'
     statusText.value = '连接失败'
@@ -216,7 +207,14 @@ const connect = async () => {
   }
 }
 
-const disconnect = () => {
+const disconnect = async () => {
+  stopReadLoop()
+  
+  try {
+    await invoke('disconnect_ssh')
+  } catch (error) {
+    console.error('断开连接失败:', error)
+  }
   connectionStatus.value = 'disconnected'
   statusText.value = '已断开'
   if (terminal) {
@@ -225,8 +223,12 @@ const disconnect = () => {
 }
 
 const handleResize = () => {
-  if (fitAddon) {
+  if (fitAddon && terminal) {
     fitAddon.fit()
+    
+    const size = terminal.getSize()
+    invoke('async_resize_pty', { rows: size.rows, cols: size.cols })
+      .catch((error) => console.error('调整 PTY 大小失败:', error))
   }
 }
 
@@ -237,6 +239,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
+  stopReadLoop()
   if (terminal) {
     terminal.dispose()
   }
@@ -448,9 +451,27 @@ onUnmounted(() => {
 .terminal-body {
   flex: 1;
   padding: 0;
+  overflow-y: auto;
 }
 
 .terminal-body :deep(.xterm) {
   height: 100%;
+}
+
+.terminal-body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.terminal-body::-webkit-scrollbar-track {
+  background: #161b22;
+}
+
+.terminal-body::-webkit-scrollbar-thumb {
+  background: #30363d;
+  border-radius: 4px;
+}
+
+.terminal-body::-webkit-scrollbar-thumb:hover {
+  background: #484f58;
 }
 </style>
