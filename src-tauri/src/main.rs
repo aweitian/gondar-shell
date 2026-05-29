@@ -93,28 +93,38 @@ async fn execute_command(
     let mut channel = sh.channel_open_session().await
         .map_err(|e| format!("打开通道失败: {}", e))?;
 
-    channel.exec(true, command.as_str()).await
-        .map_err(|e| format!("执行命令失败: {}", e))?;
+    let exec_result = channel.exec(true, command.as_str()).await;
+    if let Err(e) = exec_result {
+        return Err(format!("执行命令失败: {}", e));
+    }
 
     let mut output = String::new();
+    let mut exit_status: Option<u32> = None;
+    
     loop {
-        let msg = channel.wait().await
-            .ok_or("等待响应失败")?;
+        let msg = channel.wait().await;
         
-        match msg {
+        if msg.is_none() {
+            break;
+        }
+        
+        match msg.unwrap() {
             russh::ChannelMsg::Data { ref data } => {
                 output.push_str(&String::from_utf8_lossy(data));
             }
-            russh::ChannelMsg::ExitStatus { exit_status } => {
-                if exit_status != 0 {
-                    return Err(format!("命令执行失败，退出码: {}", exit_status));
-                }
-                break;
+            russh::ChannelMsg::ExitStatus { exit_status: status } => {
+                exit_status = Some(status);
             }
             russh::ChannelMsg::Eof => {
                 break;
             }
             _ => {}
+        }
+    }
+
+    if let Some(status) = exit_status {
+        if status != 0 {
+            return Err(format!("命令执行失败，退出码: {}", status));
         }
     }
 

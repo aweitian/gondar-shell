@@ -55,44 +55,26 @@
           </div>
         </div>
 
-        <div class="terminal-body">
-          <div class="output-area" ref="outputRef">
-            <div v-for="(line, index) in outputLines" :key="index" class="output-line">
-              <span class="prompt" v-if="line.isPrompt">{{ line.text }}</span>
-              <span class="command" v-else-if="line.isCommand">{{ line.text }}</span>
-              <span v-else>{{ line.text }}</span>
-            </div>
-          </div>
-
-          <div class="input-area">
-            <span class="prompt">root@{{ selectedConnection.ip }}:~$</span>
-            <input
-              v-model="commandInput"
-              @keydown.enter="sendCommand"
-              class="command-input"
-              :disabled="connectionStatus !== 'connected'"
-              placeholder="输入命令..."
-              ref="inputRef"
-            />
-          </div>
-        </div>
+        <div ref="terminalRef" class="terminal-body"></div>
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import { Terminal } from 'xterm'
+import { FitAddon } from 'xterm-addon-fit'
+import 'xterm/css/xterm.css'
 
 const connections = ref([])
 const selectedConnection = ref(null)
 const connectionStatus = ref('disconnected')
 const statusText = ref('已断开')
-const outputLines = ref([])
-const commandInput = ref('')
-const outputRef = ref(null)
-const inputRef = ref(null)
+const terminalRef = ref(null)
+let terminal = null
+let fitAddon = null
 
 const loadConnections = async () => {
   try {
@@ -107,16 +89,113 @@ const selectConnection = (conn) => {
     disconnect()
   }
   selectedConnection.value = conn
-  outputLines.value = []
-  outputLines.value.push({ text: `准备连接到 ${conn.label} (${conn.ip}:${conn.port})`, isPrompt: false })
+  initTerminal()
 }
+
+const initTerminal = () => {
+  if (terminal) {
+    terminal.dispose()
+  }
+  
+  terminal = new Terminal({
+    cursorBlink: true,
+    cursorStyle: 'block',
+    fontFamily: '"Fira Code", "Consolas", monospace',
+    fontSize: 14,
+    lineHeight: 1.6,
+    theme: {
+      background: '#0d1117',
+      foreground: '#c9d1d9',
+      cursor: '#58a6ff',
+      cursorAccent: '#58a6ff',
+      selection: '#264f78',
+      black: '#161b22',
+      red: '#f85149',
+      green: '#3fb950',
+      yellow: '#d29922',
+      blue: '#58a6ff',
+      magenta: '#a371f7',
+      cyan: '#56d4dd',
+      white: '#c9d1d9',
+      brightBlack: '#484f58',
+      brightRed: '#ff7b72',
+      brightGreen: '#56d364',
+      brightYellow: '#e3b341',
+      brightBlue: '#79c0ff',
+      brightMagenta: '#d2a8ff',
+      brightCyan: '#7ee787',
+      brightWhite: '#f0f6fc',
+    },
+  })
+
+  fitAddon = new FitAddon()
+  terminal.loadAddon(fitAddon)
+
+  terminal.open(terminalRef.value)
+  fitAddon.fit()
+
+  terminal.onData((data) => {
+    handleTerminalInput(data)
+  })
+
+  terminal.write(`准备连接到 ${selectedConnection.value?.label || '未知'}...\r\n`)
+}
+
+const handleTerminalInput = async (data) => {
+  if (connectionStatus.value !== 'connected') {
+    terminal.write('\r\n请先连接 SSH 服务器\r\n')
+    return
+  }
+
+  if (data === '\r') {
+    terminal.write('\r\n')
+    const command = currentCommand.trim()
+    if (command) {
+      terminal.write(`$ ${command}\r\n`)
+      terminal.write('执行中...\r\n')
+      currentCommand = ''
+      
+      try {
+        console.log('执行命令:', command)
+        const result = await invoke('execute_command', {
+          ip: selectedConnection.value.ip,
+          port: selectedConnection.value.port,
+          username: selectedConnection.value.username,
+          password: selectedConnection.value.pass,
+          command: command
+        })
+        console.log('命令结果:', result)
+        terminal.write(result)
+      } catch (error) {
+        console.error('命令执行错误:', error)
+        terminal.write(`错误: ${error}\r\n`)
+      }
+      
+      terminal.write('\r\n$ ')
+    } else {
+      terminal.write('$ ')
+    }
+  } else if (data === '\x7f') {
+    if (currentCommand.length > 0) {
+      currentCommand = currentCommand.slice(0, -1)
+      terminal.write('\b \b')
+    }
+  } else {
+    currentCommand += data
+    terminal.write(data)
+  }
+}
+
+let currentCommand = ''
 
 const connect = async () => {
   if (!selectedConnection.value) return
 
   connectionStatus.value = 'connecting'
   statusText.value = '连接中...'
-  outputLines.value = []
+  
+  initTerminal()
+  terminal.write('连接中...\r\n')
 
   try {
     const result = await invoke('connect_ssh', {
@@ -128,60 +207,39 @@ const connect = async () => {
 
     connectionStatus.value = 'connected'
     statusText.value = '已连接'
-    outputLines.value.push({ text: result, isPrompt: false })
-    outputLines.value.push({ text: `root@${selectedConnection.value.ip}:~$ `, isPrompt: true })
-    
-    await nextTick()
-    inputRef.value?.focus()
+    terminal.write(`${result}\r\n`)
+    terminal.write('$ ')
   } catch (error) {
     connectionStatus.value = 'disconnected'
     statusText.value = '连接失败'
-    outputLines.value.push({ text: `错误: ${error}`, isPrompt: false })
+    terminal.write(`错误: ${error}\r\n`)
   }
 }
 
 const disconnect = () => {
   connectionStatus.value = 'disconnected'
   statusText.value = '已断开'
-  outputLines.value.push({ text: '连接已断开', isPrompt: false })
+  if (terminal) {
+    terminal.write('\r\n连接已断开\r\n')
+  }
 }
 
-const sendCommand = async () => {
-  if (!commandInput.value.trim() || connectionStatus.value !== 'connected') return
-
-  const cmd = commandInput.value.trim()
-  outputLines.value.push({ text: cmd, isCommand: true })
-
-  try {
-    const result = await invoke('execute_command', {
-      ip: selectedConnection.value.ip,
-      port: selectedConnection.value.port,
-      username: selectedConnection.value.username,
-      password: selectedConnection.value.pass,
-      command: cmd
-    })
-
-    outputLines.value.push({ text: result, isPrompt: false })
-  } catch (error) {
-    outputLines.value.push({ text: `错误: ${error}`, isPrompt: false })
-  }
-
-  outputLines.value.push({ text: `root@${selectedConnection.value.ip}:~$ `, isPrompt: true })
-  commandInput.value = ''
-  
-  await nextTick()
-  const output = outputRef.value
-  if (output) {
-    output.scrollTop = output.scrollHeight
-  }
-  const input = inputRef.value
-  if (input) {
-    input.focus()
+const handleResize = () => {
+  if (fitAddon) {
+    fitAddon.fit()
   }
 }
 
 onMounted(() => {
   loadConnections()
+  window.addEventListener('resize', handleResize)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', handleResize)
+  if (terminal) {
+    terminal.dispose()
+  }
 })
 </script>
 
@@ -389,63 +447,10 @@ onMounted(() => {
 
 .terminal-body {
   flex: 1;
-  display: flex;
-  flex-direction: column;
-  padding: 16px;
+  padding: 0;
 }
 
-.output-area {
-  flex: 1;
-  overflow-y: auto;
-  margin-bottom: 16px;
-  font-family: 'Fira Code', 'Consolas', monospace;
-  font-size: 14px;
-  line-height: 1.6;
-  color: #c9d1d9;
-}
-
-.output-line {
-  margin-bottom: 4px;
-}
-
-.prompt {
-  color: #58a6ff;
-}
-
-.command {
-  color: #d2a8ff;
-}
-
-.input-area {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: #161b22;
-  padding: 8px 12px;
-  border-radius: 8px;
-  border: 1px solid #30363d;
-}
-
-.input-area .prompt {
-  color: #58a6ff;
-  font-family: 'Fira Code', 'Consolas', monospace;
-}
-
-.command-input {
-  flex: 1;
-  background: transparent;
-  border: none;
-  color: #c9d1d9;
-  font-family: 'Fira Code', 'Consolas', monospace;
-  font-size: 14px;
-  outline: none;
-}
-
-.command-input::placeholder {
-  color: #484f58;
-}
-
-.command-input:disabled {
-  opacity: 0.5;
+.terminal-body :deep(.xterm) {
+  height: 100%;
 }
 </style>
